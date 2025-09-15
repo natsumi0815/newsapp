@@ -113,7 +113,20 @@ export class DifyClient {
   }
 
   private generateNewsPrompt(category: NewsCategory, limit: number): string {
-    return "ニュースを取得してください"
+    const categoryName = DIFY_CONFIG.categories[category]
+    return `あなたはニュース取得専門のAIアシスタントです。${categoryName}の最新ニュースを${limit}件取得し、以下の形式で出力してください：
+
+【${categoryName}】
+TITLE: [具体的なニュースタイトル]
+SUMMARY: [ニュースの詳細な概要]
+INSIGHT: [ビジネスへの影響や示唆]
+URL: [元記事のURL]
+
+重要：
+- 必ず実際のニュースを取得してください
+- 各ニュースにURLを含めてください
+- リアルタイムの情報を提供してください
+- 過去のデータではなく、最新の情報を取得してください`
   }
 
   private parseAllCategoriesResponse(response: DifyResponse, category: NewsCategory): NewsItem[] {
@@ -143,6 +156,14 @@ export class DifyClient {
       console.log('=== FULL RESPONSE CONTENT ===')
       console.log(answer)
       console.log('=== END FULL RESPONSE ===')
+      
+      // Difyがニュース取得を拒否している場合の検出
+      if (answer.includes('リアルタイムでニュースを取得することはできません') || 
+          answer.includes('申し訳ありませんが') ||
+          answer.includes('ニュースを取得することはできません')) {
+        console.log('❌ Dify is refusing to fetch news. Using fallback news.')
+        return this.getFallbackNews('business', 5)
+      }
       
       // 本番環境でも確認できるように、重要な情報をログに出力
       console.log('🔍 Production Debug Info:')
@@ -801,7 +822,7 @@ export class DifyClient {
           title: '経済指標の動向と市場への影響',
           summary: '最新の経済指標が発表され、市場に大きな影響を与えています。GDP成長率、失業率、インフレ率などの主要指標の動向を分析し、今後の経済見通しについて考察します。',
           businessInsight: '企業は経済指標の動向を注視し、投資戦略や事業計画の見直しを検討する必要があります。特に金利動向は資金調達コストに直結するため、慎重な対応が求められます。',
-          url: 'https://example.com/fallback-news',
+          url: 'https://www.reuters.com/business/',
           timestamp: new Date().toISOString(),
           category: 'business',
           source: 'Fallback News',
