@@ -1,0 +1,669 @@
+import { DIFY_CONFIG, DifyResponse, NewsItem, NewsCategory } from './dify-config'
+
+// Dify APIクライアントクラス
+export class DifyClient {
+  private baseUrl: string
+  private apiKey: string
+  private appId: string
+
+  constructor() {
+    this.baseUrl = DIFY_CONFIG.baseUrl
+    this.apiKey = DIFY_CONFIG.apiKey
+    this.appId = DIFY_CONFIG.appId
+  }
+
+  // 基本的なAPIリクエストメソッド（Next.js APIルート経由）
+  private async makeRequest(endpoint: string, data: any): Promise<DifyResponse> {
+    console.log('=== Dify API Request (via Next.js API) ===')
+    console.log('Request data:', JSON.stringify(data, null, 2))
+    console.log('==========================================')
+    
+    const response = await fetch('/api/dify', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data),
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json()
+      console.error('=== Dify API Error ===')
+      console.error('Status:', response.status)
+      console.error('Status Text:', response.statusText)
+      console.error('Error Response:', errorData)
+      console.error('======================')
+      throw new Error(`Dify API error: ${response.status} ${response.statusText} - ${JSON.stringify(errorData)}`)
+    }
+
+    const responseData = await response.json()
+    console.log('=== Dify API Response ===')
+    console.log('Response:', JSON.stringify(responseData, null, 2))
+    console.log('=========================')
+    return responseData
+  }
+
+  // ニュース取得用のメソッド（チャットAPI使用）
+  async fetchNews(category: NewsCategory, limit: number = 5): Promise<NewsItem[]> {
+    try {
+      const prompt = this.generateNewsPrompt(category, limit)
+      
+      // DifyチャットAPIの新しい設定に合わせたリクエスト
+      const requestData = {
+        inputs: {
+          trigger_type: '全カテゴリニュース取得 (all_news)  ',
+          category: DIFY_CONFIG.categories[category] + ` (${category})`,
+        },
+        query: prompt,
+        response_mode: 'blocking',
+        conversation_id: '',
+        user: 'business-news-app',
+      }
+      
+      console.log('=== Request Data Debug ===')
+      console.log('trigger_type:', JSON.stringify(requestData.inputs.trigger_type))
+      console.log('category:', JSON.stringify(requestData.inputs.category))
+      console.log('==========================')
+      
+      const response = await this.makeRequest(DIFY_CONFIG.endpoints.chat, requestData)
+
+      console.log('Dify response:', response) // デバッグ用ログ
+      return this.parseAllCategoriesResponse(response, category)
+    } catch (error) {
+      console.error('Error fetching news from Dify:', error)
+      
+      // エラーの場合は、フォールバックニュースを返す
+      if (error instanceof Error) {
+        const errorMessage = error.message.toLowerCase()
+        console.log('エラーが発生しました:', error.message)
+        
+        // タイムアウトエラーの場合は特別なメッセージ
+        if (errorMessage.includes('timeout') || errorMessage.includes('504')) {
+          console.log('タイムアウトエラー: Difyの処理に時間がかかりすぎています')
+        }
+        
+        // すべてのエラーに対してフォールバックニュースを返す
+        console.log('フォールバックニュースを返します')
+        return this.getFallbackNews(category)
+      }
+      
+      throw error
+    }
+  }
+
+  // ニュース取得用のプロンプト生成（Difyのフローをそのまま実行）
+  private generateNewsPrompt(category: NewsCategory, limit: number): string {
+    // Difyのフローをそのまま実行するためのトリガー
+    return "ニュースを取得してください"
+  }
+
+  // DifyレスポンスをNewsItem配列に変換
+  private parseNewsResponse(response: DifyResponse, category: NewsCategory): NewsItem[] {
+    try {
+      console.log('Parsing response:', response.answer) // デバッグ用ログ
+      
+      // Difyの回答からJSON部分を抽出
+      const answer = response.answer
+      
+      // JSON配列の部分を抽出（```json と ``` で囲まれている場合）
+      const jsonMatch = answer.match(/```json\s*([\s\S]*?)\s*```/) || answer.match(/\[[\s\S]*\]/)
+      
+      if (!jsonMatch) {
+        // Difyの出力形式を解析（【カテゴリ】形式）
+        console.log('No JSON found, parsing Dify format response')
+        return this.parseDifyFormatResponse(answer, category)
+      }
+
+      const jsonString = jsonMatch[1] || jsonMatch[0]
+      console.log('Extracted JSON:', jsonString) // デバッグ用ログ
+      
+      const newsData = JSON.parse(jsonString)
+
+      // 配列でない場合は配列に変換
+      const newsArray = Array.isArray(newsData) ? newsData : [newsData]
+
+      // NewsItem形式に変換
+      return newsArray.map((item: any, index: number) => ({
+        id: item.id || `${category}-${Date.now()}-${index}`,
+        title: item.title || 'タイトル不明',
+        summary: item.summary || '概要不明',
+        businessInsight: item.businessInsight || '示唆不明',
+        url: item.url || '#',
+        timestamp: item.timestamp || '時間不明',
+        category: item.category || DIFY_CONFIG.categories[category],
+        source: item.source || '不明',
+      }))
+    } catch (error) {
+      console.error('Error parsing Dify response:', error)
+      // パースエラーの場合は回答をそのままニュースとして扱う
+      return [{
+        id: `${category}-${Date.now()}`,
+        title: `${DIFY_CONFIG.categories[category]}ニュース`,
+        summary: response.answer.substring(0, 200) + (response.answer.length > 200 ? '...' : ''),
+        businessInsight: response.answer.length > 200 ? response.answer.substring(200) : 'ビジネス的示唆を生成中...',
+        url: '',
+        timestamp: '今',
+        category: DIFY_CONFIG.categories[category],
+        source: 'Dify AI',
+      }]
+    }
+  }
+
+  // フォールバック用のサンプルニュース
+  private getFallbackNews(category: NewsCategory, limit: number): NewsItem[] {
+    const categoryName = DIFY_CONFIG.categories[category]
+    const fallbackNews: NewsItem[] = []
+    
+    // カテゴリ別のサンプルニュース
+    const sampleNews = {
+      business: [
+        {
+          title: "AI技術のビジネス活用が加速",
+          summary: "企業のAI導入が急速に進み、業務効率化とコスト削減を実現。特に製造業と金融業界で顕著な成果を上げている。",
+          businessInsight: "AI投資のROIが明確になり、中小企業でも導入が進む可能性が高い。競争優位性確保のため早期検討を推奨。"
+        },
+        {
+          title: "サステナビリティ経営の重要性増大",
+          summary: "ESG投資の拡大により、企業の環境・社会・ガバナンスへの取り組みが経営戦略の核心に。",
+          businessInsight: "投資家の評価基準が変化し、長期的な企業価値向上にはサステナビリティ戦略が不可欠。"
+        },
+        {
+          title: "リモートワークの定着とオフィス戦略",
+          summary: "ハイブリッドワークが標準となり、オフィス空間の再設計が急務。従業員満足度と生産性の両立が課題。",
+          businessInsight: "オフィスコスト削減と従業員エンゲージメント向上のバランスを取る新しい働き方が求められる。"
+        }
+      ],
+      technology: [
+        {
+          title: "量子コンピューティングの実用化が近づく",
+          summary: "量子コンピュータの商用化が進み、暗号化技術や最適化問題の解決に革命的な変化をもたらす可能性。",
+          businessInsight: "セキュリティ対策の見直しと、量子技術を活用した新サービスの開発機会に注目すべき。"
+        },
+        {
+          title: "5G/6G技術の進展とIoTの拡大",
+          summary: "次世代通信技術により、リアルタイムデータ処理とIoTデバイスの活用が飛躍的に向上。",
+          businessInsight: "製造業や物流業界での自動化・効率化の新たな可能性が開かれる。"
+        },
+        {
+          title: "メタバース技術の企業活用",
+          summary: "仮想空間での会議や展示会が普及し、新しい顧客体験とマーケティング手法が登場。",
+          businessInsight: "顧客との接点拡大とブランド体験の差別化に活用できる新たなチャネル。"
+        }
+      ],
+      politics: [
+        {
+          title: "デジタル政府の推進とDX政策",
+          summary: "行政サービスのデジタル化が加速し、国民の利便性向上と行政効率化を両立。",
+          businessInsight: "政府調達や規制緩和の動向に注目し、新規事業機会を早期に把握することが重要。"
+        },
+        {
+          title: "税制改正と企業戦略への影響",
+          summary: "法人税制の見直しにより、企業の投資判断と事業戦略に大きな影響を与える可能性。",
+          businessInsight: "税制変更を踏まえた中長期的な事業計画の見直しと投資タイミングの最適化が必要。"
+        },
+        {
+          title: "国際貿易政策の変化",
+          summary: "グローバルサプライチェーンの再構築により、企業の海外展開戦略に影響。",
+          businessInsight: "リスク分散とコスト最適化の観点から、サプライチェーンの多様化と地域戦略の見直しが急務。"
+        }
+      ]
+    }
+    
+    const news = sampleNews[category] || sampleNews.business
+    
+    for (let i = 0; i < limit; i++) {
+      const newsItem = news[i % news.length]
+      fallbackNews.push({
+        id: `fallback-${category}-${i + 1}`,
+        title: newsItem.title,
+        summary: newsItem.summary,
+        businessInsight: newsItem.businessInsight,
+        url: 'https://example.com/fallback-news',
+        timestamp: new Date().toISOString(),
+        category: category,
+        source: 'サンプルニュース (API制限中)',
+      })
+    }
+    
+    return fallbackNews
+  }
+
+  // Difyの出力形式を解析（【カテゴリ】形式）
+  private parseDifyFormatResponse(content: string, category: NewsCategory): NewsItem[] {
+    const newsItems: NewsItem[] = []
+    
+    console.log(`=== Parsing ${category} content ===`)
+    console.log('Content:', content.substring(0, 300) + '...')
+    
+    // 複数のパターンでタイトルを検索
+    const titlePatterns = [
+      /◾️\s*([^\n]+)/g,  // ◾️ パターン
+      /•\s*([^\n]+)/g,   // • パターン
+      /-\s*([^\n]+)/g,   // - パターン
+      /\d+\.\s*([^\n]+)/g // 1. パターン
+    ]
+    
+    let titleMatches: string[] = []
+    let usedPattern = ''
+    
+    for (const pattern of titlePatterns) {
+      const matches = content.match(pattern)
+      if (matches && matches.length > 0) {
+        titleMatches = matches
+        usedPattern = pattern.source
+        console.log(`Found ${matches.length} titles using pattern: ${pattern.source}`)
+        break
+      }
+    }
+    
+    // タイトルが見つからない場合は、内容全体を1つのアイテムとして扱う
+    if (titleMatches.length === 0) {
+      console.log('No titles found, treating entire content as single item')
+      titleMatches = ['【単一ニュース】']
+      usedPattern = 'single'
+    }
+    
+    if (titleMatches.length > 0) {
+      console.log(`Found ${titleMatches.length} titles:`, titleMatches)
+      
+      titleMatches.forEach((match, index) => {
+        // パターンに応じてタイトルを抽出
+        let title = ''
+        let itemContent = ''
+        
+        if (usedPattern === 'single') {
+          // 単一アイテムの場合、内容全体を使用
+          title = `${DIFY_CONFIG.categories[category]}ニュース`
+          itemContent = content
+        } else {
+          if (usedPattern.includes('◾️')) {
+            title = match.replace(/◾️\s*/, '').trim()
+          } else if (usedPattern.includes('•')) {
+            title = match.replace(/•\s*/, '').trim()
+          } else if (usedPattern.includes('-')) {
+            title = match.replace(/-\s*/, '').trim()
+          } else if (usedPattern.includes('\\d')) {
+            title = match.replace(/\d+\.\s*/, '').trim()
+          }
+          
+        // タイトルの後の内容を取得（URLも含める）
+        const titleIndex = content.indexOf(match)
+        let nextTitleIndex = index < titleMatches.length - 1 
+          ? content.indexOf(titleMatches[index + 1])
+          : content.length
+        
+        // 次のカテゴリセクション（【】で始まる）がある場合は、それより前で切り取る
+        const nextCategoryIndex = content.indexOf('【', titleIndex + match.length)
+        if (nextCategoryIndex !== -1 && nextCategoryIndex < nextTitleIndex) {
+          nextTitleIndex = nextCategoryIndex
+        }
+        
+        // URL部分も含めるために、より広い範囲を取得
+        let itemContent = content.substring(titleIndex, nextTitleIndex)
+        
+        // URLが見つからない場合は、次のタイトルまたはカテゴリまで拡張
+        if (!itemContent.includes('【URL】') && !itemContent.includes('http')) {
+          // 次のタイトルまたはカテゴリの直前まで拡張
+          const extendedEnd = index < titleMatches.length - 1 
+            ? content.indexOf(titleMatches[index + 1])
+            : content.length
+          
+          // 次のカテゴリセクションがある場合は、それより前で切り取る
+          const nextCategoryIndexExtended = content.indexOf('【', titleIndex + match.length)
+          const finalEnd = nextCategoryIndexExtended !== -1 && nextCategoryIndexExtended < extendedEnd 
+            ? nextCategoryIndexExtended 
+            : extendedEnd
+          
+          itemContent = content.substring(titleIndex, finalEnd)
+          console.log(`Extended item content to include URL. New length: ${itemContent.length}`)
+        }
+        
+        // itemContentが空の場合は、タイトルから次のタイトルまでを取得
+        if (!itemContent || itemContent.trim().length === 0) {
+          const startIndex = content.indexOf(match)
+          const endIndex = index < titleMatches.length - 1 
+            ? content.indexOf(titleMatches[index + 1])
+            : content.length
+          itemContent = content.substring(startIndex, endIndex)
+          console.log(`Fixed empty itemContent. New length: ${itemContent.length}`)
+        }
+        
+        console.log(`Processing title ${index + 1}:`, title)
+        console.log(`Item content for "${title}":`, itemContent.substring(0, 300) + '...')
+        console.log(`Full item content length:`, itemContent.length)
+        console.log(`Item content contains 【URL】:`, itemContent.includes('【URL】'))
+        console.log(`Item content contains http:`, itemContent.includes('http'))
+        
+        // 概要とビジネス示唆を抽出（より柔軟なパターン）
+        const summaryPatterns = [
+          /◎概要[：:]\s*([^◎]+?)(?=◎|【|$)/s,
+          /概要[：:]\s*([^◎]+?)(?=◎|【|$)/s,
+          /要約[：:]\s*([^◎]+?)(?=◎|【|$)/s
+        ]
+        
+        const insightPatterns = [
+          /◎ビジネス的示唆[：:]\s*([^【]+?)(?=【|$)/s,
+          /ビジネス的示唆[：:]\s*([^【]+?)(?=【|$)/s,
+          /示唆[：:]\s*([^【]+?)(?=【|$)/s,
+          /影響[：:]\s*([^【]+?)(?=【|$)/s
+        ]
+        
+        const urlPatterns = [
+          /【URL】\s*(https?:\/\/[^\s\n]+)/,  // 【URL】の直後にURL
+          /【URL】[：:]\s*([^\n]+)/,
+          /【URL】\s*([^\n]+)/,  // コロンなしのパターンを追加
+          /【URL】：\s*([^\n]+)/,  // 全角コロンのパターン
+          /【URL】\s*([^\s]+)/,  // 空白文字で区切られたURL
+          /URL[：:]\s*([^\n]+)/,
+          /リンク[：:]\s*([^\n]+)/,
+          /https?:\/\/[^\s]+/g  // 直接URLを検索
+        ]
+        
+        let summary = '概要を生成中...'
+        let insight = 'ビジネス示唆を生成中...'
+        let url = ''
+        
+        // 概要を抽出
+        for (const pattern of summaryPatterns) {
+          const match = itemContent.match(pattern)
+          if (match) {
+            summary = match[1].trim()
+            break
+          }
+        }
+        
+        // ビジネス示唆を抽出
+        for (const pattern of insightPatterns) {
+          const match = itemContent.match(pattern)
+          if (match) {
+            insight = match[1].trim()
+            break
+          }
+        }
+        
+        // URLを抽出
+        console.log(`Searching for URL in content:`, itemContent.substring(0, 500))
+        console.log(`Full item content:`, itemContent)
+        console.log(`Item content type:`, typeof itemContent)
+        console.log(`Item content length:`, itemContent.length)
+        
+        // 複数の方法でURLを検索
+        let foundUrl = false
+        
+        // 方法1: 【URL】パターンを最優先で検索
+        const urlPatternMatch = itemContent.match(/【URL】\s*(https?:\/\/[^\s\n]+)/)
+        if (urlPatternMatch) {
+          url = urlPatternMatch[1].trim()
+          console.log(`Found URL with 【URL】 pattern: ${url}`)
+          foundUrl = true
+        } else {
+          // より柔軟な【URL】パターンを試行
+          const flexibleUrlMatch = itemContent.match(/【URL】\s*([^\n]+)/)
+          if (flexibleUrlMatch) {
+            const potentialUrl = flexibleUrlMatch[1].trim()
+            if (potentialUrl.startsWith('http')) {
+              url = potentialUrl
+              console.log(`Found URL with flexible 【URL】 pattern: ${url}`)
+              foundUrl = true
+            }
+          }
+        }
+        
+        // 方法1.5: より直接的な【URL】検索
+        if (!foundUrl) {
+          const directUrlMatch = itemContent.match(/【URL】\s*(https?:\/\/[^\s\n]+)/)
+          if (directUrlMatch) {
+            url = directUrlMatch[1].trim()
+            console.log(`Found URL with direct 【URL】 pattern: ${url}`)
+            foundUrl = true
+          }
+        }
+        
+        // 方法2: 直接URLを検索
+        if (!foundUrl) {
+          const directUrlMatch = itemContent.match(/https?:\/\/[^\s\n]+/)
+          if (directUrlMatch) {
+            url = directUrlMatch[0].trim()
+            console.log(`Found direct URL: ${url}`)
+            foundUrl = true
+          }
+        }
+        
+        // 方法2.5: より広範囲なURL検索
+        if (!foundUrl) {
+          const allUrls = itemContent.match(/https?:\/\/[^\s\n]+/g)
+          if (allUrls && allUrls.length > 0) {
+            url = allUrls[0].trim()
+            console.log(`Found URL from all URLs: ${url}`)
+            foundUrl = true
+          }
+        }
+        
+        // 方法2.6: 元のコンテンツ全体からURLを検索
+        if (!foundUrl) {
+          const originalContent = content // 元のコンテンツ全体
+          const allUrlsInOriginal = originalContent.match(/https?:\/\/[^\s\n]+/g)
+          if (allUrlsInOriginal && allUrlsInOriginal.length > 0) {
+            console.log(`Found ${allUrlsInOriginal.length} URLs in original content:`, allUrlsInOriginal)
+            // タイトルに関連するURLを探す
+            const titleWords = title.split(' ').slice(0, 3) // タイトルの最初の3単語
+            for (const urlCandidate of allUrlsInOriginal) {
+              // タイトルの近くにあるURLを選択
+              const urlIndex = originalContent.indexOf(urlCandidate)
+              const titleIndex = originalContent.indexOf(title)
+              console.log(`URL: ${urlCandidate}, URL index: ${urlIndex}, Title index: ${titleIndex}, Distance: ${Math.abs(urlIndex - titleIndex)}`)
+              if (Math.abs(urlIndex - titleIndex) < 1000) { // 1000文字以内
+                url = urlCandidate.trim()
+                console.log(`Found URL near title in original content: ${url}`)
+                foundUrl = true
+                break
+              }
+            }
+          }
+        }
+        
+        // 方法2.7: タイトルに基づいてURLを直接検索
+        if (!foundUrl) {
+          const originalContent = content
+          // タイトルの一部を使ってURLを検索
+          const titleWords = title.split(' ').slice(0, 2) // 最初の2単語
+          for (const word of titleWords) {
+            const wordIndex = originalContent.indexOf(word)
+            if (wordIndex !== -1) {
+              // その単語の前後1000文字以内でURLを検索
+              const searchStart = Math.max(0, wordIndex - 1000)
+              const searchEnd = Math.min(originalContent.length, wordIndex + 1000)
+              const searchContent = originalContent.substring(searchStart, searchEnd)
+              const nearbyUrls = searchContent.match(/https?:\/\/[^\s\n]+/g)
+              if (nearbyUrls && nearbyUrls.length > 0) {
+                url = nearbyUrls[0].trim()
+                console.log(`Found URL near title word "${word}": ${url}`)
+                foundUrl = true
+                break
+              }
+            }
+          }
+        }
+        
+        // 方法3: その他のパターンを試行
+        if (!foundUrl) {
+          for (const pattern of urlPatterns) {
+            const match = itemContent.match(pattern)
+            if (match) {
+              // 直接URLパターンの場合はmatch[0]を使用
+              url = pattern.source.includes('https?') ? match[0].trim() : match[1].trim()
+              console.log(`Found URL with pattern ${pattern}: ${url}`)
+              foundUrl = true
+              break
+            } else {
+              console.log(`No match for pattern: ${pattern}`)
+            }
+          }
+        }
+        
+        if (!foundUrl) {
+          console.log(`No URL found in content: ${itemContent}`)
+          console.log(`Content length: ${itemContent.length}`)
+          console.log(`Content contains 【URL】: ${itemContent.includes('【URL】')}`)
+          console.log(`Content contains http: ${itemContent.includes('http')}`)
+          console.log(`Content contains https: ${itemContent.includes('https')}`)
+          console.log(`Content contains tipranks: ${itemContent.includes('tipranks')}`)
+          
+          // 最後の手段: 元のコンテンツから最初のURLを使用
+          const originalContent = content
+          const firstUrl = originalContent.match(/https?:\/\/[^\s\n]+/)
+          if (firstUrl) {
+            url = firstUrl[0].trim()
+            console.log(`Using first URL from original content: ${url}`)
+          } else {
+            // フォールバック: テスト用URLを設定
+            url = 'https://example.com/fallback-news'
+            console.log(`Using fallback URL: ${url}`)
+          }
+        }
+        
+        console.log(`Extracted - Summary: ${summary.substring(0, 50)}...`)
+        console.log(`Extracted - Insight: ${insight.substring(0, 50)}...`)
+        console.log(`Extracted - URL: ${url}`)
+        console.log(`URL length: ${url.length}`)
+        console.log(`URL is empty: ${url === ''}`)
+        console.log(`Final URL for news item: "${url}"`)
+        
+        newsItems.push({
+          id: `${category}-${Date.now()}-${index}`,
+          title: title,
+          summary: summary,
+          businessInsight: insight,
+          url: url,
+          timestamp: new Date().toISOString(),
+          category: category,
+          source: 'Dify AI',
+        })
+      })
+    } else {
+      console.log('No titles found with any pattern')
+    }
+    
+    // ニュースアイテムが見つからない場合は、内容全体を1つのアイテムとして扱う
+    if (newsItems.length === 0) {
+      console.log('No news items found, creating fallback item')
+      newsItems.push({
+        id: `${category}-${Date.now()}`,
+        title: `${DIFY_CONFIG.categories[category]}ニュース`,
+        summary: content.substring(0, 200) + (content.length > 200 ? '...' : ''),
+        businessInsight: 'Dify AIが生成したニュース',
+        url: '',
+        timestamp: new Date().toISOString(),
+        category: category,
+        source: 'Dify AI',
+      })
+    }
+    
+    console.log(`=== Parsed ${newsItems.length} items for ${category} ===`)
+    return newsItems
+  }
+
+  // 全カテゴリのレスポンスを解析
+  parseAllCategoriesResponse(response: DifyResponse, category: NewsCategory): NewsItem[] {
+    try {
+      console.log('=== Parsing Dify Response ===')
+      console.log('Full response length:', response.answer?.length)
+      console.log('Full response (first 1000 chars):', response.answer?.substring(0, 1000))
+      console.log('Full response (last 1000 chars):', response.answer?.substring(response.answer.length - 1000))
+      
+      // 各カテゴリの出現回数を確認
+        const categories = ['テクノロジー', '経済・ビジネス', '政治・国際関係', '経済', '政治']
+      categories.forEach(cat => {
+        const count = (response.answer?.match(new RegExp(`【${cat}】`, 'g')) || []).length
+        console.log(`Category "${cat}" appears ${count} times`)
+      })
+      
+      // ◾️ の出現回数を確認
+      const bulletCount = (response.answer?.match(/◾️/g) || []).length
+      console.log(`Total ◾️ bullets found: ${bulletCount}`)
+      
+      console.log('=============================')
+      
+      // レスポンスが存在しない場合は空配列を返す
+      if (!response || !response.answer) {
+        console.log('No response or answer found')
+        return []
+      }
+      
+      const answer = response.answer
+      const allNewsItems: NewsItem[] = []
+      
+      // カテゴリ名のパターンを定義
+      const categoryPatterns = [
+        { name: 'テクノロジー', key: 'technology' },
+        { name: '経済・ビジネス', key: 'business' },
+        { name: '政治・国際関係', key: 'politics' },
+        { name: '経済', key: 'business' },
+        { name: '政治', key: 'politics' }
+      ]
+      
+      // 各カテゴリを解析
+      categoryPatterns.forEach(({ name, key }) => {
+        // 複数のパターンでカテゴリを検索
+        const categoryPatterns = [
+          new RegExp(`【${name}】([\\s\\S]*?)(?=【|$)`),
+          new RegExp(`${name}：([\\s\\S]*?)(?=【|$)`),
+          new RegExp(`${name}\\s*([\\s\\S]*?)(?=【|$)`),
+        ]
+        
+        let categoryContent = ''
+        let foundPattern = ''
+        
+        for (const pattern of categoryPatterns) {
+          const match = answer.match(pattern)
+          if (match) {
+            categoryContent = match[1].trim()
+            foundPattern = pattern.source
+            break
+          }
+        }
+        
+        if (categoryContent) {
+          console.log(`Found ${name} content using pattern: ${foundPattern}`)
+          console.log(`Content length: ${categoryContent.length}`)
+          console.log(`Content preview:`, categoryContent.substring(0, 300) + '...')
+          
+          const items = this.parseDifyFormatResponse(categoryContent, key as NewsCategory)
+          console.log(`Parsed ${items.length} items for ${name}`)
+          allNewsItems.push(...items)
+        } else {
+          console.log(`No content found for ${name} with any pattern`)
+        }
+      })
+      
+      return allNewsItems
+    } catch (error) {
+      console.error('Error parsing all categories response:', error)
+      return []
+    }
+  }
+
+  // ヘルスチェック用メソッド
+  async healthCheck(): Promise<boolean> {
+    try {
+      await this.makeRequest(DIFY_CONFIG.endpoints.chat, {
+        inputs: {
+          trigger_type: '全カテゴリニュース取得 (all_news)  ',
+          category: '経済・ビジネス (business)',
+        },
+        query: 'ヘルスチェック',
+        response_mode: 'blocking',
+        conversation_id: '',
+        user: 'health-check',
+      })
+      return true
+    } catch (error) {
+      console.error('Dify health check failed:', error)
+      return false
+    }
+  }
+}
+
+// シングルトンインスタンス
+export const difyClient = new DifyClient()
+
