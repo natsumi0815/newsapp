@@ -144,6 +144,15 @@ export class DifyClient {
       console.log(answer)
       console.log('=== END FULL RESPONSE ===')
       
+      // 本番環境でも確認できるように、重要な情報をログに出力
+      console.log('🔍 Production Debug Info:')
+      console.log('Response length:', answer.length)
+      console.log('Contains TITLE::', answer.includes('TITLE:'))
+      console.log('Contains 【URL】:', answer.includes('【URL】'))
+      console.log('Contains URL:', answer.includes('URL:'))
+      console.log('Contains ◾️:', answer.includes('◾️'))
+      console.log('URL count:', (answer.match(/https?:\/\/[^\s\n]+/g) || []).length)
+      
       // デバッグ: レスポンス全体にURLが含まれているか確認
       const allUrlsInResponse = answer.match(/https?:\/\/[^\s\n]+/g)
       if (allUrlsInResponse && allUrlsInResponse.length > 0) {
@@ -282,8 +291,8 @@ export class DifyClient {
       
       // URLの前後からタイトルを推測
       const urlIndex = content.indexOf(url)
-      const beforeUrl = content.substring(Math.max(0, urlIndex - 200), urlIndex)
-      const afterUrl = content.substring(urlIndex + url.length, Math.min(content.length, urlIndex + url.length + 200))
+      const beforeUrl = content.substring(Math.max(0, urlIndex - 300), urlIndex)
+      const afterUrl = content.substring(urlIndex + url.length, Math.min(content.length, urlIndex + url.length + 300))
       
       console.log(`  URL index: ${urlIndex}`)
       console.log(`  Before URL: ${beforeUrl}`)
@@ -294,6 +303,7 @@ export class DifyClient {
       
       // 複数の方法でタイトルを抽出
       const titlePatterns = [
+        /TITLE:\s*([^\n]+)/i,
         /([^\n]{10,100})/g,
         /([A-Za-z][^\n]{10,100})/g,
         /([^。\n]{10,100})/g
@@ -302,9 +312,11 @@ export class DifyClient {
       for (const pattern of titlePatterns) {
         const titleMatch = beforeUrl.match(pattern)
         if (titleMatch && titleMatch.length > 0) {
-          const candidate = titleMatch[titleMatch.length - 1].trim()
-          if (candidate.length > 10 && candidate.length < 100) {
-            title = candidate
+          const candidate = titleMatch[1] || titleMatch[0]
+          const trimmedCandidate = candidate.trim()
+          if (trimmedCandidate.length > 10 && trimmedCandidate.length < 100) {
+            title = trimmedCandidate
+            console.log(`  Found title with pattern: ${pattern.source}`)
             break
           }
         }
@@ -312,9 +324,21 @@ export class DifyClient {
       
       // 概要を抽出
       let summary = 'Dify AIが生成したニュース記事です。'
-      const summaryMatch = beforeUrl.match(/([^\n]{20,200})/g)
-      if (summaryMatch && summaryMatch.length > 0) {
-        summary = summaryMatch[summaryMatch.length - 1].trim()
+      const summaryPatterns = [
+        /SUMMARY:\s*([^\n]+)/i,
+        /([^\n]{20,200})/g
+      ]
+      
+      for (const pattern of summaryPatterns) {
+        const summaryMatch = beforeUrl.match(pattern)
+        if (summaryMatch && summaryMatch.length > 0) {
+          const candidate = summaryMatch[1] || summaryMatch[0]
+          const trimmedCandidate = candidate.trim()
+          if (trimmedCandidate.length > 20 && trimmedCandidate.length < 200) {
+            summary = trimmedCandidate
+            break
+          }
+        }
       }
       
       // カテゴリを推測（URLのドメインから）
@@ -722,9 +746,9 @@ export class DifyClient {
             url = firstUrl[0].trim()
             console.log(`✅ Using first URL from original content: ${url}`)
           } else {
-            // フォールバック: テスト用URLを設定
-            url = 'https://example.com/fallback-news'
-            console.log(`❌ Using fallback URL: ${url}`)
+            // 本番環境ではフォールバックURLを使用しない
+            console.log(`❌ No URL found in production environment`)
+            url = '' // 空のURLを設定
           }
         }
         
